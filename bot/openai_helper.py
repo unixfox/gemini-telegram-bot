@@ -2,8 +2,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
-
-import tiktoken
+import base64
 
 import openai
 
@@ -119,9 +118,9 @@ class OpenAIHelper:
         """
         if chat_id not in self.conversations:
             self.reset_chat_history(chat_id)
-        return len(self.conversations[chat_id]), self.__count_tokens(self.conversations[chat_id])
+        return len(self.conversations[chat_id]), 0
 
-    async def get_chat_response(self, chat_id: int, query: str) -> tuple[str, str]:
+    async def get_chat_response(self, chat_id: int, query: str) -> tuple[str, int]:
         """
         Gets a full response from the GPT model.
         :param chat_id: The chat ID
@@ -133,7 +132,7 @@ class OpenAIHelper:
         if self.config['enable_functions'] and not self.conversations_vision[chat_id]:
             response, plugins_used = await self.__handle_function_call(chat_id, response)
             if is_direct_result(response):
-                return response, '0'
+                return response, 0
 
         answer = ''
 
@@ -154,15 +153,13 @@ class OpenAIHelper:
         plugin_names = tuple(self.plugin_manager.get_plugin_source_name(plugin) for plugin in plugins_used)
         if self.config['show_usage']:
             answer += "\n\n---\n" \
-                      f"💰 {str(response.usage.total_tokens)} {localized_text('stats_tokens', bot_language)}" \
-                      f" ({str(response.usage.prompt_tokens)} {localized_text('prompt', bot_language)}," \
-                      f" {str(response.usage.completion_tokens)} {localized_text('completion', bot_language)})"
+                      f"💰 Usage statistics not available for this model"
             if show_plugins_used:
                 answer += f"\n🔌 {', '.join(plugin_names)}"
         elif show_plugins_used:
             answer += f"\n\n---\n🔌 {', '.join(plugin_names)}"
 
-        return answer, response.usage.total_tokens
+        return answer, 0
 
     async def get_chat_response_stream(self, chat_id: int, query: str):
         """
@@ -176,7 +173,7 @@ class OpenAIHelper:
         if self.config['enable_functions'] and not self.conversations_vision[chat_id]:
             response, plugins_used = await self.__handle_function_call(chat_id, response, stream=True)
             if is_direct_result(response):
-                yield response, '0'
+                yield response, 0
                 return
 
         answer = ''
@@ -189,18 +186,17 @@ class OpenAIHelper:
                 yield answer, 'not_finished'
         answer = answer.strip()
         self.__add_to_history(chat_id, role="assistant", content=answer)
-        tokens_used = str(self.__count_tokens(self.conversations[chat_id]))
 
         show_plugins_used = len(plugins_used) > 0 and self.config['show_plugins_used']
         plugin_names = tuple(self.plugin_manager.get_plugin_source_name(plugin) for plugin in plugins_used)
         if self.config['show_usage']:
-            answer += f"\n\n---\n💰 {tokens_used} {localized_text('stats_tokens', self.config['bot_language'])}"
+            answer += f"\n\n---\n💰 Usage statistics not available for this model"
             if show_plugins_used:
                 answer += f"\n🔌 {', '.join(plugin_names)}"
         elif show_plugins_used:
             answer += f"\n\n---\n🔌 {', '.join(plugin_names)}"
 
-        yield answer, tokens_used
+        yield answer, 0
 
     @retry(
         reraise=True,
@@ -213,7 +209,7 @@ class OpenAIHelper:
         Request a response from the GPT model.
         :param chat_id: The chat ID
         :param query: The query to send to the model
-        :return: The answer from the model and the number of tokens used
+        :return: The answer from the model
         """
         bot_language = self.config['bot_language']
         try:
@@ -224,12 +220,10 @@ class OpenAIHelper:
 
             self.__add_to_history(chat_id, role="user", content=query)
 
-            # Summarize the chat history if it's too long to avoid excessive token usage
-            token_count = self.__count_tokens(self.conversations[chat_id])
-            exceeded_max_tokens = token_count + self.config['max_tokens'] > self.__max_model_tokens()
+            # Summarize the chat history if it's too long
             exceeded_max_history_size = len(self.conversations[chat_id]) > self.config['max_history_size']
 
-            if exceeded_max_tokens or exceeded_max_history_size:
+            if exceeded_max_history_size:
                 logging.info(f'Chat history for chat ID {chat_id} is too long. Summarising...')
                 try:
                     summary = await self.__summarise(self.conversations[chat_id][:-1])
@@ -241,15 +235,11 @@ class OpenAIHelper:
                     logging.warning(f'Error while summarising chat history: {str(e)}. Popping elements instead...')
                     self.conversations[chat_id] = self.conversations[chat_id][-self.config['max_history_size']:]
 
-            max_tokens_str = 'max_completion_tokens' if self.config['model'] in O_MODELS else 'max_tokens'
             common_args = {
                 'model': self.config['model'] if not self.conversations_vision[chat_id] else self.config['vision_model'],
                 'messages': self.conversations[chat_id],
                 'temperature': self.config['temperature'],
                 'n': self.config['n_choices'],
-                max_tokens_str: self.config['max_tokens'],
-                'presence_penalty': self.config['presence_penalty'],
-                'frequency_penalty': self.config['frequency_penalty'],
                 'stream': stream
             }
 
@@ -258,6 +248,7 @@ class OpenAIHelper:
                 if len(functions) > 0:
                     common_args['functions'] = self.plugin_manager.get_functions_specs()
                     common_args['function_call'] = 'auto'
+
             return await self.client.chat.completions.create(**common_args)
 
         except openai.RateLimitError as e:
@@ -336,7 +327,8 @@ class OpenAIHelper:
                 model=self.config['image_model'],
                 quality=self.config['image_quality'],
                 style=self.config['image_style'],
-                size=self.config['image_size']
+                size=self.config['image_size'],
+                response_format='b64_json'
             )
 
             if len(response.data) == 0:
@@ -346,7 +338,10 @@ class OpenAIHelper:
                     f"⚠️\n{localized_text('try_again', bot_language)}."
                 )
 
-            return response.data[0].url, self.config['image_size']
+            # Convert base64 to URL for compatibility
+            image_data = response.data[0].b64_json
+            image_url = f"data:image/jpeg;base64,{image_data}"
+            return image_url, self.config['image_size']
         except Exception as e:
             raise Exception(f"⚠️ _{localized_text('error', bot_language)}._ ⚠️\n{str(e)}") from e
 
@@ -374,13 +369,38 @@ class OpenAIHelper:
 
     async def transcribe(self, filename):
         """
-        Transcribes the audio file using the Whisper model.
+        Transcribes the audio file using the Gemini model.
         """
         try:
             with open(filename, "rb") as audio:
-                prompt_text = self.config['whisper_prompt']
-                result = await self.client.audio.transcriptions.create(model="whisper-1", file=audio, prompt=prompt_text)
-                return result.text
+                audio_bytes = audio.read()
+                base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Transcribe this audio"
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": base64_audio,
+                                "format": filename.split('.')[-1].lower()
+                            }
+                        }
+                    ]
+                }
+            ]
+
+            response = await self.client.chat.completions.create(
+                model=self.config['model'],
+                messages=messages
+            )
+
+            return response.choices[0].message.content
         except Exception as e:
             logging.exception(e)
             raise Exception(f"⚠️ _{localized_text('error', self.config['bot_language'])}._ ⚠️\n{str(e)}") from e
@@ -396,7 +416,7 @@ class OpenAIHelper:
         Request a response from the GPT model.
         :param chat_id: The chat ID
         :param query: The query to send to the model
-        :return: The answer from the model and the number of tokens used
+        :return: The answer from the model
         """
         bot_language = self.config['bot_language']
         try:
@@ -415,15 +435,12 @@ class OpenAIHelper:
                         break
                 self.__add_to_history(chat_id, role="user", content=query)
 
-            # Summarize the chat history if it's too long to avoid excessive token usage
-            token_count = self.__count_tokens(self.conversations[chat_id])
-            exceeded_max_tokens = token_count + self.config['max_tokens'] > self.__max_model_tokens()
+            # Summarize the chat history if it's too long
             exceeded_max_history_size = len(self.conversations[chat_id]) > self.config['max_history_size']
 
-            if exceeded_max_tokens or exceeded_max_history_size:
+            if exceeded_max_history_size:
                 logging.info(f'Chat history for chat ID {chat_id} is too long. Summarising...')
                 try:
-                    
                     last = self.conversations[chat_id][-1]
                     summary = await self.__summarise(self.conversations[chat_id][:-1])
                     logging.debug(f'Summary: {summary}')
@@ -440,22 +457,10 @@ class OpenAIHelper:
                 'model': self.config['vision_model'],
                 'messages': self.conversations[chat_id][:-1] + [message],
                 'temperature': self.config['temperature'],
-                'n': 1, # several choices is not implemented yet
-                'max_tokens': self.config['vision_max_tokens'],
-                'presence_penalty': self.config['presence_penalty'],
-                'frequency_penalty': self.config['frequency_penalty'],
+                'n': 1,
                 'stream': stream
             }
 
-
-            # vision model does not yet support functions
-
-            # if self.config['enable_functions']:
-            #     functions = self.plugin_manager.get_functions_specs()
-            #     if len(functions) > 0:
-            #         common_args['functions'] = self.plugin_manager.get_functions_specs()
-            #         common_args['function_call'] = 'auto'
-            
             return await self.client.chat.completions.create(**common_args)
 
         except openai.RateLimitError as e:
@@ -480,15 +485,6 @@ class OpenAIHelper:
 
         response = await self.__common_get_chat_response_vision(chat_id, content)
 
-        
-
-        # functions are not available for this model
-        
-        # if self.config['enable_functions']:
-        #     response, plugins_used = await self.__handle_function_call(chat_id, response)
-        #     if is_direct_result(response):
-        #         return response, '0'
-
         answer = ''
 
         if len(response.choices) > 1 and self.config['n_choices'] > 1:
@@ -504,20 +500,11 @@ class OpenAIHelper:
             self.__add_to_history(chat_id, role="assistant", content=answer)
 
         bot_language = self.config['bot_language']
-        # Plugins are not enabled either
-        # show_plugins_used = len(plugins_used) > 0 and self.config['show_plugins_used']
-        # plugin_names = tuple(self.plugin_manager.get_plugin_source_name(plugin) for plugin in plugins_used)
         if self.config['show_usage']:
             answer += "\n\n---\n" \
-                      f"💰 {str(response.usage.total_tokens)} {localized_text('stats_tokens', bot_language)}" \
-                      f" ({str(response.usage.prompt_tokens)} {localized_text('prompt', bot_language)}," \
-                      f" {str(response.usage.completion_tokens)} {localized_text('completion', bot_language)})"
-            # if show_plugins_used:
-            #     answer += f"\n🔌 {', '.join(plugin_names)}"
-        # elif show_plugins_used:
-        #     answer += f"\n\n---\n🔌 {', '.join(plugin_names)}"
+                      f"💰 Usage statistics not available for this model"
 
-        return answer, response.usage.total_tokens
+        return answer, 0
 
     async def interpret_image_stream(self, chat_id, fileobj, prompt=None):
         """
@@ -531,14 +518,6 @@ class OpenAIHelper:
 
         response = await self.__common_get_chat_response_vision(chat_id, content, stream=True)
 
-        
-
-        # if self.config['enable_functions']:
-        #     response, plugins_used = await self.__handle_function_call(chat_id, response, stream=True)
-        #     if is_direct_result(response):
-        #         yield response, '0'
-        #         return
-
         answer = ''
         async for chunk in response:
             if len(chunk.choices) == 0:
@@ -549,18 +528,11 @@ class OpenAIHelper:
                 yield answer, 'not_finished'
         answer = answer.strip()
         self.__add_to_history(chat_id, role="assistant", content=answer)
-        tokens_used = str(self.__count_tokens(self.conversations[chat_id]))
 
-        #show_plugins_used = len(plugins_used) > 0 and self.config['show_plugins_used']
-        #plugin_names = tuple(self.plugin_manager.get_plugin_source_name(plugin) for plugin in plugins_used)
         if self.config['show_usage']:
-            answer += f"\n\n---\n💰 {tokens_used} {localized_text('stats_tokens', self.config['bot_language'])}"
-        #     if show_plugins_used:
-        #         answer += f"\n🔌 {', '.join(plugin_names)}"
-        # elif show_plugins_used:
-        #     answer += f"\n\n---\n🔌 {', '.join(plugin_names)}"
+            answer += f"\n\n---\n💰 Usage statistics not available for this model"
 
-        yield answer, tokens_used
+        yield answer, 0
 
     def reset_chat_history(self, chat_id, content=''):
         """
@@ -643,97 +615,3 @@ class OpenAIHelper:
         raise NotImplementedError(
             f"Max tokens for model {self.config['model']} is not implemented yet."
         )
-
-    # https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
-    def __count_tokens(self, messages) -> int:
-        """
-        Counts the number of tokens required to send the given messages.
-        :param messages: the messages to send
-        :return: the number of tokens required
-        """
-        model = self.config['model']
-        try:
-            encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            encoding = tiktoken.get_encoding("o200k_base")
-
-        if model in GPT_ALL_MODELS:
-            tokens_per_message = 3
-            tokens_per_name = 1
-        else:
-            raise NotImplementedError(f"""num_tokens_from_messages() is not implemented for model {model}.""")
-        num_tokens = 0
-        for message in messages:
-            num_tokens += tokens_per_message
-            for key, value in message.items():
-                if key == 'content':
-                    if isinstance(value, str):
-                        num_tokens += len(encoding.encode(value))
-                    else:
-                        for message1 in value:
-                            if message1['type'] == 'image_url':
-                                image = decode_image(message1['image_url']['url'])
-                                num_tokens += self.__count_tokens_vision(image)
-                            else:
-                                num_tokens += len(encoding.encode(message1['text']))
-                else:
-                    num_tokens += len(encoding.encode(value))
-                    if key == "name":
-                        num_tokens += tokens_per_name
-        num_tokens += 3  # every reply is primed with <|start|>assistant<|message|>
-        return num_tokens
-
-    # no longer needed
-
-    def __count_tokens_vision(self, image_bytes: bytes) -> int:
-        """
-        Counts the number of tokens for interpreting an image.
-        :param image_bytes: image to interpret
-        :return: the number of tokens required
-        """
-        image_file = io.BytesIO(image_bytes)
-        image = Image.open(image_file)
-        model = self.config['vision_model']
-        if model not in GPT_4_VISION_MODELS:
-            raise NotImplementedError(f"""count_tokens_vision() is not implemented for model {model}.""")
-        
-        w, h = image.size
-        if w > h: w, h = h, w
-        # this computation follows https://platform.openai.com/docs/guides/vision and https://openai.com/pricing#gpt-4-turbo
-        base_tokens = 85
-        detail = self.config['vision_detail']
-        if detail == 'low':
-            return base_tokens
-        elif detail == 'high' or detail == 'auto': # assuming worst cost for auto
-            f = max(w / 768, h / 2048)
-            if f > 1:
-                w, h = int(w / f), int(h / f)
-            tw, th = (w + 511) // 512, (h + 511) // 512
-            tiles = tw * th
-            num_tokens = base_tokens + tiles * 170
-            return num_tokens
-        else:
-            raise NotImplementedError(f"""unknown parameter detail={detail} for model {model}.""")
-
-    # No longer works as of July 21st 2023, as OpenAI has removed the billing API
-    # def get_billing_current_month(self):
-    #     """Gets billed usage for current month from OpenAI API.
-    #
-    #     :return: dollar amount of usage this month
-    #     """
-    #     headers = {
-    #         "Authorization": f"Bearer {openai.api_key}"
-    #     }
-    #     # calculate first and last day of current month
-    #     today = date.today()
-    #     first_day = date(today.year, today.month, 1)
-    #     _, last_day_of_month = monthrange(today.year, today.month)
-    #     last_day = date(today.year, today.month, last_day_of_month)
-    #     params = {
-    #         "start_date": first_day,
-    #         "end_date": last_day
-    #     }
-    #     response = requests.get("https://api.openai.com/dashboard/billing/usage", headers=headers, params=params)
-    #     billing_data = json.loads(response.text)
-    #     usage_month = billing_data["total_usage"] / 100  # convert cent amount to dollars
-    #     return usage_month
