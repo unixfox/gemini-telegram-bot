@@ -94,9 +94,9 @@ class OpenAIHelper:
 
     def get_conversation_stats(self, chat_id: int) -> tuple[int, int]:
         """
-        Gets the number of messages and tokens used in the conversation.
+        Gets the number of messages in the conversation.
         :param chat_id: The chat ID
-        :return: A tuple containing the number of messages and tokens used
+        :return: A tuple containing the number of messages
         """
         if chat_id not in self.conversations:
             self.reset_chat_history(chat_id)
@@ -107,7 +107,7 @@ class OpenAIHelper:
         Gets a full response from the GPT model.
         :param chat_id: The chat ID
         :param query: The query to send to the model
-        :return: The answer from the model and the number of tokens used
+        :return: The answer from the model
         """
         plugins_used = ()
         response = await self.__common_get_chat_response(chat_id, query)
@@ -130,15 +130,9 @@ class OpenAIHelper:
             answer = response.choices[0].message.content.strip()
             self.__add_to_history(chat_id, role="assistant", content=answer)
 
-        bot_language = self.config['bot_language']
         show_plugins_used = len(plugins_used) > 0 and self.config['show_plugins_used']
         plugin_names = tuple(self.plugin_manager.get_plugin_source_name(plugin) for plugin in plugins_used)
-        if self.config['show_usage']:
-            answer += "\n\n---\n" \
-                      f"💰 Usage statistics not available for this model"
-            if show_plugins_used:
-                answer += f"\n🔌 {', '.join(plugin_names)}"
-        elif show_plugins_used:
+        if show_plugins_used:
             answer += f"\n\n---\n🔌 {', '.join(plugin_names)}"
 
         return answer, 0
@@ -331,7 +325,7 @@ class OpenAIHelper:
         """
         Generates an audio from the given text using TTS model.
         :param prompt: The text to send to the model
-        :return: The audio in bytes and the text size
+        :return: The audio in bytes
         """
         bot_language = self.config['bot_language']
         try:
@@ -481,11 +475,6 @@ class OpenAIHelper:
             answer = response.choices[0].message.content.strip()
             self.__add_to_history(chat_id, role="assistant", content=answer)
 
-        bot_language = self.config['bot_language']
-        if self.config['show_usage']:
-            answer += "\n\n---\n" \
-                      f"💰 Usage statistics not available for this model"
-
         return answer, 0
 
     async def interpret_image_stream(self, chat_id, fileobj, prompt=None):
@@ -510,9 +499,6 @@ class OpenAIHelper:
                 yield answer, 'not_finished'
         answer = answer.strip()
         self.__add_to_history(chat_id, role="assistant", content=answer)
-
-        if self.config['show_usage']:
-            answer += f"\n\n---\n💰 Usage statistics not available for this model"
 
         yield answer, 0
 
