@@ -348,13 +348,6 @@ class ChatGPTTelegramBot:
             try:
                 transcript = await self.openai.transcribe(filename_mp3)
 
-                transcription_price = self.config['transcription_price']
-                self.usage[user_id].add_transcription_seconds(audio_track.duration_seconds, transcription_price)
-
-                allowed_user_ids = self.config['allowed_user_ids'].split(',')
-                if str(user_id) not in allowed_user_ids and 'guests' in self.usage:
-                    self.usage["guests"].add_transcription_seconds(audio_track.duration_seconds, transcription_price)
-
                 # check if transcript starts with any of the prefixes
                 response_to_transcription = any(transcript.lower().startswith(prefix.lower()) if prefix else False
                                                 for prefix in self.config['voice_reply_prompts'])
