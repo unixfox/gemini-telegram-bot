@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import io
+import base64
 
 from uuid import uuid4
 from telegram import BotCommandScopeAllGroupChats, Update, constants
@@ -215,18 +216,42 @@ class ChatGPTTelegramBot:
         async def _generate():
             try:
                 image_url, image_size = await self.openai.generate_image(prompt=image_query)
-                if self.config['image_receive_mode'] == 'photo':
-                    await update.effective_message.reply_photo(
-                        reply_to_message_id=get_reply_to_message_id(self.config, update),
-                        photo=image_url
-                    )
-                elif self.config['image_receive_mode'] == 'document':
-                    await update.effective_message.reply_document(
-                        reply_to_message_id=get_reply_to_message_id(self.config, update),
-                        document=image_url
-                    )
+                
+                # Convert data URL to bytes
+                if image_url.startswith('data:image/'):
+                    # Extract base64 data
+                    image_data = image_url.split(',')[1]
+                    image_bytes = base64.b64decode(image_data)
+                    image_io = io.BytesIO(image_bytes)
+                    image_io.name = 'generated_image.png'
+                    
+                    if self.config['image_receive_mode'] == 'photo':
+                        await update.effective_message.reply_photo(
+                            reply_to_message_id=get_reply_to_message_id(self.config, update),
+                            photo=image_io
+                        )
+                    elif self.config['image_receive_mode'] == 'document':
+                        await update.effective_message.reply_document(
+                            reply_to_message_id=get_reply_to_message_id(self.config, update),
+                            document=image_io
+                        )
+                    else:
+                        raise Exception(f"env variable IMAGE_RECEIVE_MODE has invalid value {self.config['image_receive_mode']}")
                 else:
-                    raise Exception(f"env variable IMAGE_RECEIVE_MODE has invalid value {self.config['image_receive_mode']}")
+                    # Handle regular URLs if any
+                    if self.config['image_receive_mode'] == 'photo':
+                        await update.effective_message.reply_photo(
+                            reply_to_message_id=get_reply_to_message_id(self.config, update),
+                            photo=image_url
+                        )
+                    elif self.config['image_receive_mode'] == 'document':
+                        await update.effective_message.reply_document(
+                            reply_to_message_id=get_reply_to_message_id(self.config, update),
+                            document=image_url
+                        )
+                    else:
+                        raise Exception(f"env variable IMAGE_RECEIVE_MODE has invalid value {self.config['image_receive_mode']}")
+                
                 # add image request to users usage tracker
                 user_id = update.message.from_user.id
                 self.usage[user_id].add_image_request(image_size, self.config['image_prices'])
