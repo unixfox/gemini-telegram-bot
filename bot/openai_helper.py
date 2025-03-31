@@ -291,7 +291,7 @@ class OpenAIHelper:
 
     async def generate_image(self, prompt: str) -> tuple[str, str]:
         """
-        Generates an image from the given prompt using DALL·E model.
+        Generates an image from the given prompt using Gemini model.
         :param prompt: The prompt to send to the model
         :return: The image URL and the image size
         """
@@ -307,19 +307,31 @@ class OpenAIHelper:
                 response_format='b64_json'
             )
 
-            if len(response.data) == 0:
-                logging.error(f'No response from GPT: {str(response)}')
+            if not response or not response.data or len(response.data) == 0:
+                logging.error(f'No response from Gemini: {str(response)}')
                 raise Exception(
-                    f"⚠️ _{localized_text('error', bot_language)}._ "
+                    f"⚠️ {localized_text('error', bot_language)}. "
                     f"⚠️\n{localized_text('try_again', bot_language)}."
                 )
 
-            # Convert base64 to URL for compatibility
-            image_data = response.data[0].b64_json
+            # For Gemini, the response might be in a different format
+            # Let's try to handle both OpenAI and Gemini response formats
+            image_data = None
+            if hasattr(response.data[0], 'b64_json'):
+                image_data = response.data[0].b64_json
+            elif hasattr(response.data[0], 'data'):
+                image_data = response.data[0].data
+            elif isinstance(response.data[0], dict):
+                image_data = response.data[0].get('b64_json') or response.data[0].get('data')
+            
+            if not image_data:
+                raise Exception("No image data found in response")
+
+            # Convert base64 to data URL for compatibility
             image_url = f"data:image/jpeg;base64,{image_data}"
             return image_url, self.config['image_size']
         except Exception as e:
-            raise Exception(f"⚠️ _{localized_text('error', bot_language)}._ ⚠️\n{str(e)}") from e
+            raise Exception(f"⚠️ {localized_text('error', bot_language)}. ⚠️\n{str(e)}") from e
 
     async def generate_speech(self, text: str) -> tuple[any, int]:
         """
